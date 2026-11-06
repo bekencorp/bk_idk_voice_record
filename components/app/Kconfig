@@ -9,6 +9,28 @@ menu "App"
 		bool "Enable Ftpd Upgrade"
 		default n
 
+	# Lab/demo only. No credential is built in: both values default
+	# empty, and an empty username or password refuses every login
+	# (fail closed). Set a device-specific pair before enabling FTP
+	# outside a lab. Do not ship a well-known demo password.
+	config FTPD_USERNAME
+		string "FTP daemon username"
+		depends on FTPD_UPGRADE
+		default ""
+		help
+			Lab/demo only. Compile-time FTP username
+			(CONFIG_FTPD_USERNAME). Leave empty to refuse every login.
+
+	config FTPD_PASSWORD
+		string "FTP daemon password"
+		depends on FTPD_UPGRADE
+		default ""
+		help
+			Lab/demo only. Compile-time FTP password
+			(CONFIG_FTPD_PASSWORD). An empty client password is never
+			accepted. An empty value here also refuses every login
+			(fail closed).
+
 	config OTA_HTTP
 		depends on WIFI_ENABLE
 		bool "Enable Ota Http"

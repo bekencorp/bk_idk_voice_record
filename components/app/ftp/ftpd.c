@@ -48,6 +48,14 @@
 
 #include "vfs.h"
 
+/* Fail closed when sdkconfig has not picked up the Kconfig symbols yet. */
+#ifndef CONFIG_FTPD_USERNAME
+#define CONFIG_FTPD_USERNAME ""
+#endif
+#ifndef CONFIG_FTPD_PASSWORD
+#define CONFIG_FTPD_PASSWORD ""
+#endif
+
 //#define FTPD_DEBUG
 #include "bk_uart.h"
 #ifdef FTPD_DEBUG
@@ -687,24 +695,59 @@ static int open_dataconnection(struct tcp_pcb *pcb, struct ftpd_msgstate *fsm)
 	return 0;
 }
 
+/* Empty configured or supplied credentials never match (fail closed). */
+static int ftpd_cred_match(const char *got, const char *expect)
+{
+	if (got == NULL || expect == NULL || expect[0] == '\0' || got[0] == '\0')
+		return 0;
+	return strcmp(got, expect) == 0;
+}
+
+/* FTPD_IDLE and the transfer states are reached only after a good PASS. */
+static int ftpd_logged_in(const struct ftpd_msgstate *fsm)
+{
+	switch (fsm->state) {
+	case FTPD_IDLE:
+	case FTPD_NLST:
+	case FTPD_LIST:
+	case FTPD_RETR:
+	case FTPD_RNFR:
+	case FTPD_STOR:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+static int ftpd_pre_login_cmd(const char *cmd)
+{
+	return strcmp(cmd, "USER") == 0 ||
+	       strcmp(cmd, "PASS") == 0 ||
+	       strcmp(cmd, "QUIT") == 0;
+}
+
 static void cmd_user(const char *arg, struct tcp_pcb *pcb, struct ftpd_msgstate *fsm)
 {
+	if (!ftpd_cred_match(arg, CONFIG_FTPD_USERNAME)) {
+		send_msg(pcb, fsm, msg530);
+		fsm->state = FTPD_USER;
+		return;
+	}
 	send_msg(pcb, fsm, msg331);
 	fsm->state = FTPD_PASS;
-	/*
-	   send_msg(pcb, fs, msgLoginFailed);
-	   fs->state = FTPD_QUIT;
-	 */
 }
 
 static void cmd_pass(const char *arg, struct tcp_pcb *pcb, struct ftpd_msgstate *fsm)
 {
+	if (fsm->state != FTPD_PASS || !ftpd_cred_match(arg, CONFIG_FTPD_PASSWORD)) {
+		send_msg(pcb, fsm, msg530);
+		/* Wrong, empty, or out-of-sequence PASS must not log the session in. */
+		if (!ftpd_logged_in(fsm))
+			fsm->state = FTPD_USER;
+		return;
+	}
 	send_msg(pcb, fsm, msg230);
 	fsm->state = FTPD_IDLE;
-	/*
-	   send_msg(pcb, fs, msgLoginFailed);
-	   fs->state = FTPD_QUIT;
-	 */
 }
 
 static void cmd_port(const char *arg, struct tcp_pcb *pcb, struct ftpd_msgstate *fsm)
@@ -1251,7 +1294,9 @@ static err_t ftpd_msgrecv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t 
 			else
 				pt = &text[strlen(cmd) + 1];
 
-			if (ftpd_cmd->func)
+			if (!ftpd_logged_in(fsm) && !ftpd_pre_login_cmd(cmd))
+				send_msg(pcb, fsm, msg530);
+			else if (ftpd_cmd->func)
 				ftpd_cmd->func(pt, pcb, fsm);
 			else
 				send_msg(pcb, fsm, msg502);
@@ -1308,7 +1353,8 @@ static err_t ftpd_msgaccept(void *arg, struct tcp_pcb *pcb, err_t err)
 
 	/* Initialize the structure. */
 	sfifo_init(&fsm->fifo, 2000);
-	fsm->state = FTPD_IDLE;
+	/* Not authenticated. FTPD_IDLE is the logged-in command state. */
+	fsm->state = FTPD_USER;
 	fsm->vfs = vfs_openfs();
 	if (!fsm->vfs) {
 		os_free(fsm);
